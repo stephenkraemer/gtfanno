@@ -7,6 +7,12 @@ Currently annotated features
 - intergenic
 - distant cis-regulatory domain (DCRD)
 
+Input file restrictions
+- query_bed: (this will be improved in the future)
+  - no chromosome prefix allowed
+  - must be sorted -k1,1 -k2,2n -k3,3n
+
+
 Output files:
   - all_annotations (BED3+annocols, pickled DataFrame)
     - Saved to output_trunk + '_all-annotations.{bed,p}'
@@ -79,13 +85,18 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 import numpy as np
 from pybedtools import BedTool
+
 # %%
 
 
-def annotate(query_bed, gtf_fp, trunk_path, tmpdir,
-             promoter = (-5000, 1000),
-             distant_cis_regulatory_domain = (-50000, -5000),
-             ):
+def annotate(
+    query_bed,
+    gtf_fp,
+    trunk_path,
+    tmpdir,
+    promoter=(-5000, 1000),
+    distant_cis_regulatory_domain=(-50000, -5000),
+):
     """Annotate query regions with feature from a GTF or GFF file
 
     Args:
@@ -108,28 +119,44 @@ def annotate(query_bed, gtf_fp, trunk_path, tmpdir,
         Annotated regions in BED and pickled pandas.DataFrame format
     """
 
-    assert Path(trunk_path).parent.exists(), \
-        'The output directory does not exist, abort...'
-    
+    assert Path(
+        trunk_path
+    ).parent.exists(), "The output directory does not exist, abort..."
+
     # %% Setup
     # --------------------------------------------------------------------------
-
 
     # Typical error is to specify upstream bp with negative number
     assert distant_cis_regulatory_domain[0] < 0, promoter[0] < 0
     # The upstream area of the DCRD should be larger than the one of the promoter
     assert distant_cis_regulatory_domain[0] < promoter[0]
 
-    output_cols = ['Chromosome', 'Start', 'End', 'gtfanno_uid', 'center',
-                   'feat_class', 'perc_feature', 'perc_region', 'distance', 'has_center',
-                   'gene_name','gene_id', 'transcript_id', 'appris_principal_score',
-                   'feat_chrom', 'feat_start', 'feat_end', 'feat_center', 'feat_strand']
+    output_cols = [
+        "Chromosome",
+        "Start",
+        "End",
+        "gtfanno_uid",
+        "center",
+        "feat_class",
+        "perc_feature",
+        "perc_region",
+        "distance",
+        "has_center",
+        "gene_name",
+        "gene_id",
+        "transcript_id",
+        "appris_principal_score",
+        "feat_chrom",
+        "feat_start",
+        "feat_end",
+        "feat_center",
+        "feat_strand",
+    ]
 
     tmpdir_obj = TemporaryDirectory(dir=tmpdir)
     tmpdir_path = Path(tmpdir_obj.name)
 
-
-    print('Loading data')
+    print("Loading data")
     # query df columns: Chromosome, Start, End, gtfanno_uid
     # the gtfanno_uid is kept across all operations and can be used for merging purposes etc.
     # the gtfanno_uid is not used as an index, because the indexing operations used
@@ -140,37 +167,52 @@ def annotate(query_bed, gtf_fp, trunk_path, tmpdir,
     # %% Produce annotation dataframes for different features, concatenate, sort
     # --------------------------------------------------------------------------
 
-    print('Annotating promoter regions')
+    print("Annotating promoter regions")
     # The annotation dataframes produced in the following steps use the gtfanno_uid as index
-    promoter_anno_df = annotate_with_tss(gencode_df, query_bt,
-                                         distant_cis_regulatory_domain, promoter,
-                                         output_cols, chromosome_dtype, tmpdir_path)
+    promoter_anno_df = annotate_with_tss(
+        gencode_df,
+        query_bt,
+        distant_cis_regulatory_domain,
+        promoter,
+        output_cols,
+        chromosome_dtype,
+        tmpdir_path,
+    )
 
-    print('Annotating transcript parts')
+    print("Annotating transcript parts")
     transcript_feature_anno_df = annotate_transcript_parts(
-            query_bt, gencode_df, output_cols, chromosome_dtype, tmpdir_path)
+        query_bt, gencode_df, output_cols, chromosome_dtype, tmpdir_path
+    )
 
-    print('Merge results')
+    print("Merge results")
     # Concatenates two integer indices, leading to misleading duplicates -> reset
-    full_annos = (pd.concat([
-        promoter_anno_df, transcript_feature_anno_df], axis=0)
-                  .reset_index(drop=True))
+    full_annos = pd.concat(
+        [promoter_anno_df, transcript_feature_anno_df], axis=0
+    ).reset_index(drop=True)
     # Note: not yet sorted! First, we need to make the feature_class categorical
 
-    precedence = pd.Series(['Promoter',
-                            "5'-UTR", "3'-UTR", 'exon',
-                            'transcript',  # these are intron matches
-                            'DCRD',
-                            ])
-    full_annos['feat_class'] = pd.Categorical(full_annos['feat_class'], ordered=True,
-                                              categories=precedence)
+    precedence = pd.Series(
+        [
+            "Promoter",
+            "5'-UTR",
+            "3'-UTR",
+            "exon",
+            "transcript",  # these are intron matches
+            "DCRD",
+        ]
+    )
+    full_annos["feat_class"] = pd.Categorical(
+        full_annos["feat_class"], ordered=True, categories=precedence
+    )
 
     # This sorting scheme is used for categorizing annotations into primary and secondary
     # As a tie breaker when several annotations for a feature with the same precedence
     # are present, currently the distance is used. Therefore, the distance is included into
     # the sorting scheme. This could be changed into other statistics, and be made available
     # as a parameter
-    full_annos_sorted = full_annos.sort_values(['gtfanno_uid', 'feat_class', 'distance'])
+    full_annos_sorted = full_annos.sort_values(
+        ["gtfanno_uid", "feat_class", "distance"]
+    )
 
     # How many regions can we expect to have multiple annotations?
     # almost all regions have multiple annotations (tested with DMRs against gencode)
@@ -190,16 +232,16 @@ def annotate(query_bed, gtf_fp, trunk_path, tmpdir,
 
         # Only one annotation for the region -> must be primary
         if feat_class_ser.shape[0] == 1:
-            rank_ser = pd.Series('primary', index=feat_class_ser.index)
+            rank_ser = pd.Series("primary", index=feat_class_ser.index)
             return rank_ser
 
-        rank_ser = pd.Series('secondary', index=feat_class_ser.index)
+        rank_ser = pd.Series("secondary", index=feat_class_ser.index)
         top_class = feat_class_ser.iat[0]
         is_top_class = feat_class_ser.eq(top_class)
 
         # Only one annotation for the top class -> make the top annotation primary
         if is_top_class.sum() == 1:
-            rank_ser.loc[is_top_class] = 'primary'
+            rank_ser.loc[is_top_class] = "primary"
             return rank_ser
 
         # If we get to here, we have more than one top feature hit
@@ -214,7 +256,7 @@ def annotate(query_bed, gtf_fp, trunk_path, tmpdir,
             # transcripts for the same gene, and we don't prefer the
             # primary transcript here... This could easily be
             # implemented by sorting by the appris_principal score
-            rank_ser.iat[0] = 'primary'
+            rank_ser.iat[0] = "primary"
             return rank_ser
 
         # If we get to here, we have multiple genes for the top feature
@@ -223,73 +265,94 @@ def annotate(query_bed, gtf_fp, trunk_path, tmpdir,
         # the principal transcript.
         def tag_first_element(ser):
             ser = ser.copy()
-            ser.iat[0] = 'primary'
+            ser.iat[0] = "primary"
             return ser
+
         return rank_ser.groupby(gene_anno).transform(tag_first_element)
 
-    print('Classify annotations')
-    full_annos_sorted['feature_rank'] = (
-        full_annos_sorted
-            .groupby(['gtfanno_uid'])['feat_class']
-            .transform(classify_annos, gene_names_ser=full_annos_sorted['gene_name']))
+    print("Classify annotations")
+    full_annos_sorted["feature_rank"] = full_annos_sorted.groupby(["gtfanno_uid"])[
+        "feat_class"
+    ].transform(classify_annos, gene_names_ser=full_annos_sorted["gene_name"])
     # %%
 
-    print('Add intergenic regions')
+    print("Add intergenic regions")
     # All query regions without annotations are labeled as 'intergenic'
     # Don't add the info columns for regions with annotations, we will fill those
     # with NA via pd.concat
-    uids_annotated_regions = full_annos_sorted['gtfanno_uid'].unique()
-    intergenic_regions = (query_df
-                          .loc[~query_df['gtfanno_uid'].isin(uids_annotated_regions), :]
-                          .copy()
-                          .assign(feat_class = 'intergenic',
-                                  feature_rank = 'primary'))
+    uids_annotated_regions = full_annos_sorted["gtfanno_uid"].unique()
+    intergenic_regions = (
+        query_df.loc[~query_df["gtfanno_uid"].isin(uids_annotated_regions), :]
+        .copy()
+        .assign(feat_class="intergenic", feature_rank="primary")
+    )
 
     # Merge intergenic regions and regions with annotations
     # the missing annotation columns for the intergenic regions trigger a
     # sort of the columns. Disable with sort=False
-    all_regions_annotated = (pd.concat([full_annos_sorted, intergenic_regions],
-                                       sort=False, axis=0))
+    all_regions_annotated = pd.concat(
+        [full_annos_sorted, intergenic_regions], sort=False, axis=0
+    )
 
     # Sanity check: when we sort by GRange columns, the gtfanno_uid should be
     # sorted too. All original UIDs should still be present.
-    all_regions_annotated.sort_values(['Chromosome', 'Start', 'End'], inplace=True)
-    assert (all_regions_annotated['gtfanno_uid'].unique() == np.arange(query_df.shape[0])).all()
+    all_regions_annotated.sort_values(["Chromosome", "Start", "End"], inplace=True)
+    assert (
+        all_regions_annotated["gtfanno_uid"].unique() == np.arange(query_df.shape[0])
+    ).all()
 
-    print('Save results')
+    print("Save results")
     # TODO: document intron handling, this is also a possible improvement
-    primary_annotations = all_regions_annotated.query('feature_rank == "primary"').copy()
-    primary_annotations.loc[primary_annotations.feat_class.eq('transcript'), 'feat_class'] = 'intron'
-    assert (primary_annotations['gtfanno_uid'].unique() == np.arange(query_df.shape[0])).all()
+    primary_annotations = all_regions_annotated.query(
+        'feature_rank == "primary"'
+    ).copy()
+    primary_annotations.loc[
+        primary_annotations.feat_class.eq("transcript"), "feat_class"
+    ] = "intron"
+    assert (
+        primary_annotations["gtfanno_uid"].unique() == np.arange(query_df.shape[0])
+    ).all()
 
     # Report some basic stats for further sanity checks
-    print('Basic stats for primary annotations')
-    primary_anno_freq = (primary_annotations['gtfanno_uid']
-                         .value_counts().value_counts().
-                         to_frame().reset_index()
-                         .set_axis(['#Primary annotations', 'Frequency'], axis=1, inplace=False))
+    print("Basic stats for primary annotations")
+    primary_anno_freq = (
+        primary_annotations["gtfanno_uid"]
+        .value_counts()
+        .value_counts()
+        .to_frame()
+        .reset_index()
+        .set_axis(["#Primary annotations", "Frequency"], axis=1, inplace=False)
+    )
     print(primary_anno_freq)
-    feature_freq = (primary_annotations['feat_class']
-                    .value_counts().to_frame().reset_index()
-                    .set_axis(['Feature', 'Frequency'], axis=1, inplace=False))
+    feature_freq = (
+        primary_annotations["feat_class"]
+        .value_counts()
+        .to_frame()
+        .reset_index()
+        .set_axis(["Feature", "Frequency"], axis=1, inplace=False)
+    )
     print(feature_freq)
 
-    primary_annotations_bed = trunk_path + '_primary-annotations.bed'
-    (primary_annotations
-     .rename(columns={'Chromosome': '#Chromosome'})
-     .to_csv(primary_annotations_bed, sep='\t', header=True, index=False)
-     )
-    primary_annotations.to_pickle(primary_annotations_bed.replace('.bed', '.p'))
+    primary_annotations_bed = trunk_path + "_primary-annotations.bed"
+    (
+        primary_annotations.rename(columns={"Chromosome": "#Chromosome"}).to_csv(
+            primary_annotations_bed, sep="\t", header=True, index=False
+        )
+    )
+    primary_annotations.to_pickle(primary_annotations_bed.replace(".bed", ".p"))
 
-    all_annotations_bed = trunk_path + '_all-annotations.bed'
-    (all_regions_annotated
-     .rename(columns={'Chromosome': '#Chromosome'})
-     .to_csv(all_annotations_bed, sep='\t', header=True, index=False))
-    all_regions_annotated.to_pickle(all_annotations_bed.replace('.bed', '.p'))
+    all_annotations_bed = trunk_path + "_all-annotations.bed"
+    (
+        all_regions_annotated.rename(columns={"Chromosome": "#Chromosome"}).to_csv(
+            all_annotations_bed, sep="\t", header=True, index=False
+        )
+    )
+    all_regions_annotated.to_pickle(all_annotations_bed.replace(".bed", ".p"))
 
 
-def annotate_transcript_parts(query_bt, gencode_df, output_cols,
-                              chromosome_dtype, tmpdir_path) -> pd.DataFrame:
+def annotate_transcript_parts(
+    query_bt, gencode_df, output_cols, chromosome_dtype, tmpdir_path
+) -> pd.DataFrame:
     """
 
     Args:
@@ -322,29 +385,30 @@ def annotate_transcript_parts(query_bt, gencode_df, output_cols,
           is currently left unannotated. This is debatable and could be changed.
     """
 
-
     # Introns are implicitely annotated, if a region is annotated to a transcript,
     # but not to a exon or UTR
-    transcript_features = ('transcript', 'exon', 'UTR')
+    transcript_features = ("transcript", "exon", "UTR")
 
     # Annotate UTRs as 5' or 3'
     # --------------------------------------------------------------------------
-    transcript_features_df = gencode_df.loc[gencode_df['feature'].isin(transcript_features), :].reset_index(drop=True)
+    transcript_features_df = gencode_df.loc[
+        gencode_df["feature"].isin(transcript_features), :
+    ].reset_index(drop=True)
     transcript_features_df = expand_gtf_attributes(transcript_features_df)
-    is_plus_transcript = transcript_features_df.feat_strand.eq('+')
-    is_utr_or_transcript = transcript_features_df.feature.isin(['UTR', 'exon'])
-    plus_strand_utrs_exon_df = (transcript_features_df
-                        .loc[is_plus_transcript & is_utr_or_transcript, :]
-                        .sort_values(['transcript_id', 'Start', 'End'], ascending=True))
-    minus_strand_utrs_exons_df = (transcript_features_df
-                         .loc[~is_plus_transcript & is_utr_or_transcript, :]
-                         .sort_values(['transcript_id', 'Start', 'End'], ascending=False))
+    is_plus_transcript = transcript_features_df.feat_strand.eq("+")
+    is_utr_or_transcript = transcript_features_df.feature.isin(["UTR", "exon"])
+    plus_strand_utrs_exon_df = transcript_features_df.loc[
+        is_plus_transcript & is_utr_or_transcript, :
+    ].sort_values(["transcript_id", "Start", "End"], ascending=True)
+    minus_strand_utrs_exons_df = transcript_features_df.loc[
+        ~is_plus_transcript & is_utr_or_transcript, :
+    ].sort_values(["transcript_id", "Start", "End"], ascending=False)
 
     def assign_utr_location(feature_ser):
         new_feature_ser = feature_ser.copy()
         exon_found = False
         for i in range(len(new_feature_ser)):
-            if new_feature_ser.iat[i] == 'exon':
+            if new_feature_ser.iat[i] == "exon":
                 exon_found = True
                 continue
             if exon_found:
@@ -353,42 +417,73 @@ def annotate_transcript_parts(query_bt, gencode_df, output_cols,
                 new_feature_ser.iat[i] = "3'-UTR"
         return new_feature_ser
 
-    plus_utr_annos = plus_strand_utrs_exon_df.groupby('transcript_id')['feature'].transform(assign_utr_location)
-    minus_utr_annos = minus_strand_utrs_exons_df.groupby('transcript_id')['feature'].transform(assign_utr_location)
-    transcript_features_df.loc[plus_utr_annos.index, 'feature'] = plus_utr_annos
-    transcript_features_df.loc[minus_utr_annos.index, 'feature'] = minus_utr_annos
+    plus_utr_annos = plus_strand_utrs_exon_df.groupby("transcript_id")[
+        "feature"
+    ].transform(assign_utr_location)
+    minus_utr_annos = minus_strand_utrs_exons_df.groupby("transcript_id")[
+        "feature"
+    ].transform(assign_utr_location)
+    transcript_features_df.loc[plus_utr_annos.index, "feature"] = plus_utr_annos
+    transcript_features_df.loc[minus_utr_annos.index, "feature"] = minus_utr_annos
 
     # Intersect with query regions
     # --------------------------------------------------------------------------
-    transcript_features_fp = tmpdir_path.joinpath('transcript_parts.gtf')
+    transcript_features_fp = tmpdir_path.joinpath("transcript_parts.gtf")
     # bedtools seems to loose the first additional column for a gtf format file?
     # to be safe, add the attribute annotations again at the end
-    transcript_features_df.iloc[:, 0:9].to_csv(transcript_features_fp, sep='\t', header=False, index=False)
+    transcript_features_df.iloc[:, 0:9].to_csv(
+        transcript_features_fp, sep="\t", header=False, index=False
+    )
     transcript_features_bt = BedTool(str(transcript_features_fp))
-    transcript_features_intersect_bt = query_bt.intersect(transcript_features_bt, wa=True, wb=True)
-    col_names = ['Chromosome', 'Start', 'End', 'gtfanno_uid'] + [
-        'feat_chrom', 'source', 'feat_class', 'feat_start', 'feat_end',
-        'score', 'feat_strand', 'frame', 'attribute']
-    transcript_feature_annos_df = pd.read_csv(transcript_features_intersect_bt.fn,
-                                              sep='\t', header=None,
-                                              names=col_names,
-                                              dtype={'Chromosome': chromosome_dtype})
+    transcript_features_intersect_bt = query_bt.intersect(
+        transcript_features_bt, wa=True, wb=True
+    )
+    col_names = ["Chromosome", "Start", "End", "gtfanno_uid"] + [
+        "feat_chrom",
+        "source",
+        "feat_class",
+        "feat_start",
+        "feat_end",
+        "score",
+        "feat_strand",
+        "frame",
+        "attribute",
+    ]
+    transcript_feature_annos_df = pd.read_csv(
+        transcript_features_intersect_bt.fn,
+        sep="\t",
+        header=None,
+        names=col_names,
+        dtype={"Chromosome": chromosome_dtype},
+    )
 
     # Add additional stats
     # --------------------------------------------------------------------------
-    feat_size = transcript_feature_annos_df.eval('feat_end - feat_start')
-    overlap_start = transcript_feature_annos_df.eval('Start - feat_start').where(lambda ser: ser.gt(0), 0)
-    overlap_end = transcript_feature_annos_df.eval('End - feat_start').where(lambda ser: ser.lt(feat_size), feat_size)
+    feat_size = transcript_feature_annos_df.eval("feat_end - feat_start")
+    overlap_start = transcript_feature_annos_df.eval("Start - feat_start").where(
+        lambda ser: ser.gt(0), 0
+    )
+    overlap_end = transcript_feature_annos_df.eval("End - feat_start").where(
+        lambda ser: ser.lt(feat_size), feat_size
+    )
     overlap_size = overlap_end - overlap_start
-    region_size = transcript_feature_annos_df.eval('End - Start')
+    region_size = transcript_feature_annos_df.eval("End - Start")
     # region center
-    transcript_feature_annos_df['center'] = transcript_feature_annos_df.eval('Start + (End - Start)/2')
-    transcript_feature_annos_df['feat_center'] = transcript_feature_annos_df.eval('feat_start + (feat_end - feat_start)/2')
-    transcript_feature_annos_df['distance'] = transcript_feature_annos_df.eval('center - feat_center')
+    transcript_feature_annos_df["center"] = transcript_feature_annos_df.eval(
+        "Start + (End - Start)/2"
+    )
+    transcript_feature_annos_df["feat_center"] = transcript_feature_annos_df.eval(
+        "feat_start + (feat_end - feat_start)/2"
+    )
+    transcript_feature_annos_df["distance"] = transcript_feature_annos_df.eval(
+        "center - feat_center"
+    )
     # TODO: is this correct at the boundaries of the interval?
-    transcript_feature_annos_df['has_center'] = transcript_feature_annos_df['distance'].lt(feat_size / 2)
-    transcript_feature_annos_df['perc_feature'] = overlap_size / feat_size
-    transcript_feature_annos_df['perc_region'] = overlap_size / region_size
+    transcript_feature_annos_df["has_center"] = transcript_feature_annos_df[
+        "distance"
+    ].lt(feat_size / 2)
+    transcript_feature_annos_df["perc_feature"] = overlap_size / feat_size
+    transcript_feature_annos_df["perc_region"] = overlap_size / region_size
     transcript_feature_annos_df = expand_gtf_attributes(transcript_feature_annos_df)
     transcript_feature_annos_df = transcript_feature_annos_df[output_cols]
 
@@ -398,42 +493,73 @@ def annotate_transcript_parts(query_bt, gencode_df, output_cols,
     # as start_codons are added, where center-overlap should not be required
     # Also, this disards regions at the end of the gene body which overlap the body
     # but not with their center, which may be suboptimal
-    transcript_feature_annos_df = transcript_feature_annos_df.loc[transcript_feature_annos_df.has_center, :]
+    transcript_feature_annos_df = transcript_feature_annos_df.loc[
+        transcript_feature_annos_df.has_center, :
+    ]
     return transcript_feature_annos_df
 
 
-def get_input_data(gtf_fp, query_bed, tmpdir_path) \
-        -> Tuple[pd.DataFrame, pd.DataFrame, BedTool]:
+def get_input_data(
+    gtf_fp, query_bed, tmpdir_path
+) -> Tuple[pd.DataFrame, pd.DataFrame, BedTool]:
     """Provide gencode as df, query as df and BedTool
 
     For the query table, only the Coordinate columns are used. As a fourth
     column, a running uid for each region is added.
     """
 
-    strand_dtype = CategoricalDtype(['+', '-'], ordered=True)
+    strand_dtype = CategoricalDtype(["+", "-"], ordered=True)
     gencode_df = pd.read_csv(
-            gtf_fp, sep='\t', header=None, comment='#',
-            names=['feat_chrom', 'source', 'feature', 'Start', 'End',
-                   'score', 'feat_strand', 'frame', 'attribute'],
-            dtype={'feat_chrom': str, 'Start': 'i8', 'End': 'i8', 'feat_strand': strand_dtype})
+        gtf_fp,
+        sep="\t",
+        header=None,
+        comment="#",
+        names=[
+            "feat_chrom",
+            "source",
+            "feature",
+            "Start",
+            "End",
+            "score",
+            "feat_strand",
+            "frame",
+            "attribute",
+        ],
+        dtype={
+            "feat_chrom": str,
+            "Start": "i8",
+            "End": "i8",
+            "feat_strand": strand_dtype,
+        },
+    )
 
-    query_df = pd.read_csv(query_bed, comment='#',
-                                names=['Chromosome', 'Start', 'End'],
-                                usecols=[0, 1, 2],
-                                header=None, sep='\t',
-                           dtype={'Chromosome': str})
-    query_df['gtfanno_uid'] = np.arange(query_df.shape[0])
-    query_df['Chromosome'] = pd.Categorical(query_df['Chromosome'], ordered=True)
-    query_bed_with_region_ids = tmpdir_path / 'query_bed_with_region_ids.bed'
-    query_df.to_csv(query_bed_with_region_ids, header=False,
-                         index=False, sep='\t')
+    query_df = pd.read_csv(
+        query_bed,
+        comment="#",
+        names=["Chromosome", "Start", "End"],
+        usecols=[0, 1, 2],
+        header=None,
+        sep="\t",
+        dtype={"Chromosome": str},
+    )
+    query_df["gtfanno_uid"] = np.arange(query_df.shape[0])
+    query_df["Chromosome"] = pd.Categorical(query_df["Chromosome"], ordered=True)
+    query_bed_with_region_ids = tmpdir_path / "query_bed_with_region_ids.bed"
+    query_df.to_csv(query_bed_with_region_ids, header=False, index=False, sep="\t")
     query_bt = BedTool(str(query_bed_with_region_ids))
     return gencode_df, query_df, query_bt
 
+
 # %%
-def annotate_with_tss(gencode_df, query_bt,
-                      distant_cis_regulatory_domain, promoter,
-                      output_cols, chromosome_dtype, tmpdir_path) -> pd.DataFrame:
+def annotate_with_tss(
+    gencode_df,
+    query_bt,
+    distant_cis_regulatory_domain,
+    promoter,
+    output_cols,
+    chromosome_dtype,
+    tmpdir_path,
+) -> pd.DataFrame:
     """ Compute TSS annotations
 
     Find all queries whose center is within the promoter or the DCRD.
@@ -464,67 +590,93 @@ def annotate_with_tss(gencode_df, query_bt,
 
     # TSS slop operation to create the TSS area defined above
     transcripts = gencode_df.query('feature == "transcript"').copy()
-    transcripts['TSS'] = -1
-    transcripts['feat_start'] = -1
-    transcripts['feat_end'] = -1
-    transcripts['feat_class'] = 'TSS_area'
+    transcripts["TSS"] = -1
+    transcripts["feat_start"] = -1
+    transcripts["feat_end"] = -1
+    transcripts["feat_class"] = "TSS_area"
     transcripts = expand_gtf_attributes(transcripts)
-    on_plus_strand = transcripts['feat_strand'] == '+'
-    transcripts.loc[on_plus_strand, 'TSS'] = transcripts.loc[on_plus_strand, 'Start']
-    transcripts.loc[~on_plus_strand, 'TSS'] = transcripts.loc[~on_plus_strand, 'End']
-    transcripts.loc[on_plus_strand, 'feat_start'] = transcripts.loc[on_plus_strand, 'TSS'] + upper_bound
-    transcripts.loc[on_plus_strand, 'feat_end'] = transcripts.loc[on_plus_strand, 'TSS'] + lower_bound
-    transcripts.loc[~on_plus_strand, 'feat_start'] = transcripts.loc[~on_plus_strand, 'TSS'] - lower_bound
-    transcripts.loc[~on_plus_strand, 'feat_end'] = transcripts.loc[~on_plus_strand, 'TSS'] - upper_bound
-    transcripts = transcripts.sort_values(['feat_chrom', 'feat_start', 'feat_end', 'TSS'])
-    transcripts.loc[transcripts['feat_start'].lt(0), 'feat_start'] = 0
-    transcripts_cols = ['feat_chrom', 'feat_start', 'feat_end', 'TSS', 'feat_strand', 'feat_class',
-                        'gene_name', 'gene_id', 'transcript_id', 'appris_principal_score']
+    on_plus_strand = transcripts["feat_strand"] == "+"
+    transcripts.loc[on_plus_strand, "TSS"] = transcripts.loc[on_plus_strand, "Start"]
+    transcripts.loc[~on_plus_strand, "TSS"] = transcripts.loc[~on_plus_strand, "End"]
+    transcripts.loc[on_plus_strand, "feat_start"] = (
+        transcripts.loc[on_plus_strand, "TSS"] + upper_bound
+    )
+    transcripts.loc[on_plus_strand, "feat_end"] = (
+        transcripts.loc[on_plus_strand, "TSS"] + lower_bound
+    )
+    transcripts.loc[~on_plus_strand, "feat_start"] = (
+        transcripts.loc[~on_plus_strand, "TSS"] - lower_bound
+    )
+    transcripts.loc[~on_plus_strand, "feat_end"] = (
+        transcripts.loc[~on_plus_strand, "TSS"] - upper_bound
+    )
+    transcripts = transcripts.sort_values(
+        ["feat_chrom", "feat_start", "feat_end", "TSS"]
+    )
+    transcripts.loc[transcripts["feat_start"].lt(0), "feat_start"] = 0
+    transcripts_cols = [
+        "feat_chrom",
+        "feat_start",
+        "feat_end",
+        "TSS",
+        "feat_strand",
+        "feat_class",
+        "gene_name",
+        "gene_id",
+        "transcript_id",
+        "appris_principal_score",
+    ]
 
     # Intersect the TSS areas with the regions_bed.
     # - tss which are further than the downstream and upstream bp away from a region are ignored
     #   and will not be reported
     # - multiple hits per region are possible
     # TODO: check that this works
-    all_tss_area_bed = tmpdir_path.joinpath('tss-area-slop.bed')
-    transcripts[transcripts_cols].to_csv(all_tss_area_bed, sep='\t', header=False, index=False)
+    all_tss_area_bed = tmpdir_path.joinpath("tss-area-slop.bed")
+    transcripts[transcripts_cols].to_csv(
+        all_tss_area_bed, sep="\t", header=False, index=False
+    )
     all_tss_area_bt = BedTool(str(all_tss_area_bed))
     tss_intersect_bt = query_bt.intersect(all_tss_area_bt, wa=True, wb=True)
-    tss_anno = pd.read_csv(tss_intersect_bt.fn, sep='\t',
-                                   names=['Chromosome', 'Start', 'End', 'gtfanno_uid']
-                                         + transcripts_cols,
-                           dtype={'Chromosome': chromosome_dtype})
+    tss_anno = pd.read_csv(
+        tss_intersect_bt.fn,
+        sep="\t",
+        names=["Chromosome", "Start", "End", "gtfanno_uid"] + transcripts_cols,
+        dtype={"Chromosome": chromosome_dtype},
+    )
 
     # Add the remaining required output columns and bring in correct order
-    tss_anno['perc_feature'] = np.nan
-    tss_anno['perc_region'] = np.nan
+    tss_anno["perc_feature"] = np.nan
+    tss_anno["perc_region"] = np.nan
     # Add distance of query center to TSS
     # has_center is set to False, evaluation whether a region is a promoter
     # or DCRD region will be done in subsequent step
-    tss_anno['center'] = tss_anno.eval('Start + (End - Start)/2')
-    tss_anno['feat_center'] = np.nan
-    tss_anno['has_center'] = False
-    tss_anno['distance'] = tss_anno.eval('center - TSS')
+    tss_anno["center"] = tss_anno.eval("Start + (End - Start)/2")
+    tss_anno["feat_center"] = np.nan
+    tss_anno["has_center"] = False
+    tss_anno["distance"] = tss_anno.eval("center - TSS")
     tss_anno = tss_anno[output_cols]
 
     # classify into proximal and distal cis regulatory regions
     # discard other tss area overlaps
-    is_proximal_promoter = tss_anno.eval(
-            f'{promoter[0]} <= distance <= {promoter[1]}')
+    is_proximal_promoter = tss_anno.eval(f"{promoter[0]} <= distance <= {promoter[1]}")
     is_distant_cis_regulatory_domain = tss_anno.eval(
-            f'{distant_cis_regulatory_domain[0]} '
-            f'<= distance'
-            f' <= {distant_cis_regulatory_domain[1]}')
-    tss_anno['feat_class'] = np.nan
-    tss_anno.loc[is_proximal_promoter, 'feat_class'] = 'Promoter'
-    tss_anno.loc[is_proximal_promoter, 'has_center'] = True
-    tss_anno.loc[is_distant_cis_regulatory_domain, 'feat_class'] = 'DCRD'
-    tss_anno.loc[is_distant_cis_regulatory_domain, 'has_center'] = True
+        f"{distant_cis_regulatory_domain[0]} "
+        f"<= distance"
+        f" <= {distant_cis_regulatory_domain[1]}"
+    )
+    tss_anno["feat_class"] = np.nan
+    tss_anno.loc[is_proximal_promoter, "feat_class"] = "Promoter"
+    tss_anno.loc[is_proximal_promoter, "has_center"] = True
+    tss_anno.loc[is_distant_cis_regulatory_domain, "feat_class"] = "DCRD"
+    tss_anno.loc[is_distant_cis_regulatory_domain, "has_center"] = True
     # Discard regions without annotation
     # These are regions which overlap with TSS area, but not with their center
-    tss_anno = tss_anno.loc[~tss_anno['feat_class'].isna(), :]
+    tss_anno = tss_anno.loc[~tss_anno["feat_class"].isna(), :]
 
     return tss_anno
+
+
 # %%
 
 
@@ -537,10 +689,11 @@ def expand_gtf_attributes(df):
     - appris_principal_score (float). Features without a principal score are
       assigned a score of 0
     """
-    df['gene_id'] = df['attribute'].str.extract('gene_id "(.*?)";')
-    df['transcript_id'] = df['attribute'].str.extract('transcript_id "(.*?)";')
-    df['gene_name'] = df['attribute'].str.extract('gene_name "(.*?)";')
-    df['appris_principal_score'] = df['attribute'].str.extract('tag "appris_principal_(\d)";').astype(float)
-    df['appris_principal_score'] = df['appris_principal_score'].fillna(0)
+    df["gene_id"] = df["attribute"].str.extract('gene_id "(.*?)";')
+    df["transcript_id"] = df["attribute"].str.extract('transcript_id "(.*?)";')
+    df["gene_name"] = df["attribute"].str.extract('gene_name "(.*?)";')
+    df["appris_principal_score"] = (
+        df["attribute"].str.extract('tag "appris_principal_(\d)";').astype(float)
+    )
+    df["appris_principal_score"] = df["appris_principal_score"].fillna(0)
     return df
-
