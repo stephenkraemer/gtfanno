@@ -81,9 +81,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Tuple
 
+import numpy as np
 import pandas as pd
 from pandas.api.types import CategoricalDtype
-import numpy as np
 from pybedtools import BedTool
 
 # %%
@@ -193,8 +193,8 @@ def annotate(
 
     precedence = pd.Series(
         [
-            "Promoter",
             "5'-UTR",
+            "Promoter",
             "3'-UTR",
             "exon",
             "transcript",  # these are intron matches
@@ -268,7 +268,11 @@ def annotate(
             ser.iat[0] = "primary"
             return ser
 
-        return rank_ser.groupby(gene_anno).transform(tag_first_element)
+        rank_ser.loc[is_top_class] = (
+            rank_ser.loc[is_top_class].groupby(gene_anno).transform(tag_first_element)
+        )
+
+        return rank_ser
 
     print("Classify annotations")
     full_annos_sorted["feature_rank"] = full_annos_sorted.groupby(["gtfanno_uid"])[
@@ -404,27 +408,19 @@ def annotate_transcript_parts(
         ~is_plus_transcript & is_utr_or_transcript, :
     ].sort_values(["transcript_id", "Start", "End"], ascending=False)
 
-    def assign_utr_location(feature_ser):
-        new_feature_ser = feature_ser.copy()
-        exon_found = False
-        for i in range(len(new_feature_ser)):
-            if new_feature_ser.iat[i] == "exon":
-                exon_found = True
-                continue
-            if exon_found:
-                new_feature_ser.iat[i] = "5'-UTR"
-            else:
-                new_feature_ser.iat[i] = "3'-UTR"
-        return new_feature_ser
-
-    plus_utr_annos = plus_strand_utrs_exon_df.groupby("transcript_id")[
-        "feature"
-    ].transform(assign_utr_location)
-    minus_utr_annos = minus_strand_utrs_exons_df.groupby("transcript_id")[
-        "feature"
-    ].transform(assign_utr_location)
-    transcript_features_df.loc[plus_utr_annos.index, "feature"] = plus_utr_annos
-    transcript_features_df.loc[minus_utr_annos.index, "feature"] = minus_utr_annos
+    print("UTR classification")
+    plus_features_with_utr_distinction_ser = _assign_utr_location(
+        plus_strand_utrs_exon_df
+    )
+    minus_features_with_utr_distinction_ser = _assign_utr_location(
+        minus_strand_utrs_exons_df
+    )
+    transcript_features_df.loc[
+        plus_features_with_utr_distinction_ser.index, "feature"
+    ] = plus_features_with_utr_distinction_ser
+    transcript_features_df.loc[
+        minus_features_with_utr_distinction_ser.index, "feature"
+    ] = minus_features_with_utr_distinction_ser
 
     # Intersect with query regions
     # --------------------------------------------------------------------------
@@ -470,18 +466,23 @@ def annotate_transcript_parts(
     region_size = transcript_feature_annos_df.eval("End - Start")
     # region center
     transcript_feature_annos_df["center"] = transcript_feature_annos_df.eval(
-        "Start + (End - Start)/2"
+        "Start + (End - Start + 1) / 2 - 1"
     )
     transcript_feature_annos_df["feat_center"] = transcript_feature_annos_df.eval(
-        "feat_start + (feat_end - feat_start)/2"
+        "feat_start + (feat_end - feat_start + 1) / 2 - 1"
     )
-    transcript_feature_annos_df["distance"] = transcript_feature_annos_df.eval(
-        "center - feat_center"
-    )
+
+    transcript_feature_annos_df.loc[
+        lambda df: df["feat_strand"] == "+", "distance"
+    ] = transcript_feature_annos_df.eval("feat_center - center")
+    transcript_feature_annos_df.loc[
+        lambda df: df["feat_strand"] == "-", "distance"
+    ] = transcript_feature_annos_df.eval("center - feat_center")
+
     # TODO: is this correct at the boundaries of the interval?
-    transcript_feature_annos_df["has_center"] = transcript_feature_annos_df[
-        "distance"
-    ].lt(feat_size / 2)
+    transcript_feature_annos_df["has_center"] = np.ceil(
+        transcript_feature_annos_df["distance"].abs()
+    ).le(np.ceil(feat_size / 2))
     transcript_feature_annos_df["perc_feature"] = overlap_size / feat_size
     transcript_feature_annos_df["perc_region"] = overlap_size / region_size
     transcript_feature_annos_df = expand_gtf_attributes(transcript_feature_annos_df)
@@ -509,6 +510,7 @@ def get_input_data(
     """
 
     strand_dtype = CategoricalDtype(["+", "-"], ordered=True)
+
     gencode_df = pd.read_csv(
         gtf_fp,
         sep="\t",
@@ -532,6 +534,10 @@ def get_input_data(
             "feat_strand": strand_dtype,
         },
     )
+    assert gencode_df.eval("Start <= End").all()
+    assert (
+        gencode_df["feat_strand"].isin(["+", "-"]).all()
+    ), "distance computations require that the strand is defined for all features"
 
     query_df = pd.read_csv(
         query_bed,
@@ -544,9 +550,12 @@ def get_input_data(
     )
     query_df["gtfanno_uid"] = np.arange(query_df.shape[0])
     query_df["Chromosome"] = pd.Categorical(query_df["Chromosome"], ordered=True)
+    assert query_df.eval("Start <= End").all()
+
     query_bed_with_region_ids = tmpdir_path / "query_bed_with_region_ids.bed"
     query_df.to_csv(query_bed_with_region_ids, header=False, index=False, sep="\t")
     query_bt = BedTool(str(query_bed_with_region_ids))
+
     return gencode_df, query_df, query_bt
 
 
@@ -560,7 +569,7 @@ def annotate_with_tss(
     chromosome_dtype,
     tmpdir_path,
 ) -> pd.DataFrame:
-    """ Compute TSS annotations
+    """Compute TSS annotations
 
     Find all queries whose center is within the promoter or the DCRD.
 
@@ -604,6 +613,8 @@ def annotate_with_tss(
     transcripts.loc[on_plus_strand, "feat_end"] = (
         transcripts.loc[on_plus_strand, "TSS"] + lower_bound
     )
+    # Note that for minus strand features, feat_start and feat_end are still
+    # specified as plus strand coordinates
     transcripts.loc[~on_plus_strand, "feat_start"] = (
         transcripts.loc[~on_plus_strand, "TSS"] - lower_bound
     )
@@ -654,7 +665,15 @@ def annotate_with_tss(
     tss_anno["center"] = tss_anno.eval("Start + (End - Start)/2")
     tss_anno["feat_center"] = np.nan
     tss_anno["has_center"] = False
-    tss_anno["distance"] = tss_anno.eval("center - TSS")
+
+    tss_anno["distance"] = np.nan
+    tss_anno.loc[tss_anno["feat_strand"] == "+", "distance"] = tss_anno.eval(
+        "center - TSS"
+    )
+    tss_anno.loc[tss_anno["feat_strand"] == "-", "distance"] = -tss_anno.eval(
+        "center - TSS"
+    )
+    assert tss_anno["distance"].notnull().all()
     tss_anno = tss_anno[output_cols]
 
     # classify into proximal and distal cis regulatory regions
@@ -697,3 +716,83 @@ def expand_gtf_attributes(df):
     )
     df["appris_principal_score"] = df["appris_principal_score"].fillna(0)
     return df
+
+
+def _assign_utr_location(utrs_exon_df: pd.DataFrame) -> pd.Series:
+    """
+
+    Args:
+        utrs_exon_df: Start End feature transcript_id
+            sorted on ["transcript_id", "Start", "End"], ascending or descending depending on strand
+            df can only contain one strand at a time
+            must only contain exons and UTRs in features column
+
+    Returns:
+        features series with 5' and 3' UTR distinction
+
+    """
+
+    assert (np.unique(utrs_exon_df["feature"]) == np.array(["UTR", "exon"])).all()
+
+    features_with_utr_5_and_3_prime_distinction = pd.Series(
+        "exon", index=utrs_exon_df.index, dtype=object
+    )
+    # for debugging
+    # print_counter = 0
+    # from IPython.display import display
+
+    for unused_transcript_id, transcript_group_df in utrs_exon_df.groupby(
+        "transcript_id"
+    ):
+        transcript_interval_is_present_twice = transcript_group_df.duplicated(
+            subset=["Start", "End"], keep=False
+        )
+        non_utr_exon_found = (
+            False  # exon is not completely a UTR, it may be partially a UTR
+        )
+        three_prime_utr_found = False
+        # for debugging
+        # five_prime_utr_found = True
+        for row_idx in range(transcript_group_df.shape[0]):
+            curr_feature_name = transcript_group_df.iloc[row_idx].loc["feature"]
+            if curr_feature_name == "exon":
+                if transcript_interval_is_present_twice.iat[row_idx]:
+                    # the entire exon is a UTR
+                    # there will be a duplicate entry for the UTR feature, sorted either to occur right before or right after this entry
+                    continue
+                else:
+                    # at least a part of this exon is not a UTR
+                    non_utr_exon_found = True
+                    # defensive check: after having called a 3' UTR, no more non UTR exons may occur
+                    if three_prime_utr_found:
+                        raise ValueError("Misclassification of UTR occured")
+            elif curr_feature_name == "UTR":
+                if non_utr_exon_found:
+                    features_with_utr_5_and_3_prime_distinction.at[
+                        transcript_group_df.index[row_idx]
+                    ] = "3'-UTR"
+                    # Used for defensive check above
+                    three_prime_utr_found = True
+                else:
+                    features_with_utr_5_and_3_prime_distinction.at[
+                        transcript_group_df.index[row_idx]
+                    ] = "5'-UTR"
+                    # for printing during debugging
+                    # five_prime_utr_found = True
+            else:
+                raise ValueError(
+                    "Unexpected feature encountered during UTR classification"
+                )
+        # for debugging, print transcripts containing UTRs
+        # if (three_prime_utr_found or five_prime_utr_found) and transcript_group_df['feat_strand'].iat[0] == '-':
+        #     display(transcript_group_df[["Start", "End", "feature", "feat_strand"]])
+        #     display(
+        #         features_with_utr_5_and_3_prime_distinction.loc[
+        #             transcript_group_df.index
+        #         ]
+        #     )
+        #     print_counter += 1
+        #     if print_counter > 50:
+        #         raise ValueError()
+
+    return features_with_utr_5_and_3_prime_distinction
