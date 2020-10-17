@@ -193,17 +193,20 @@ def annotate(
 
     precedence = pd.Series(
         [
-            "5'-UTR",
             "Promoter",
+            "5'-UTR",
             "3'-UTR",
             "exon",
-            "transcript",  # these are intron matches
+            "intron",
+            # if a feature has no annotation has exon or UTR and it is in a transcript, it is an intron. This if found by annotating query regions against full transcript feature regions and then applying this logic.
+            "transcript",
             "DCRD",
+            "intergenic",
         ]
     )
-    full_annos["feat_class"] = pd.Categorical(
-        full_annos["feat_class"], ordered=True, categories=precedence
-    )
+
+    feat_class_cat_dtype = CategoricalDtype(ordered=True, categories=precedence)
+    full_annos["feat_class"] = full_annos["feat_class"].astype(feat_class_cat_dtype)
 
     # This sorting scheme is used for categorizing annotations into primary and secondary
     # As a tie breaker when several annotations for a feature with the same precedence
@@ -219,65 +222,13 @@ def annotate(
     # multi_anno_regions = full_annos_sorted.groupby(['Chromosome', 'Start', 'End']).filter(lambda df: df.shape[0] > 1)
 
     # %%
-    def classify_annos(feat_class_ser, gene_names_ser):
-        """Classify annotations into primary and secondary
-
-        - The input dataframe MUST BE SORTED by region, feature class, distance
-        - feature class must be a Categorical with appropriate order (following
-          the feature precedence)
-        - the sorting scheme is leveraged to find the highest priority candidate:
-          the highest priority feature will be at the beginning of the series,
-          and within the feature, the lowest distance will be at the beginning
-        """
-
-        # Only one annotation for the region -> must be primary
-        if feat_class_ser.shape[0] == 1:
-            rank_ser = pd.Series("primary", index=feat_class_ser.index)
-            return rank_ser
-
-        rank_ser = pd.Series("secondary", index=feat_class_ser.index)
-        top_class = feat_class_ser.iat[0]
-        is_top_class = feat_class_ser.eq(top_class)
-
-        # Only one annotation for the top class -> make the top annotation primary
-        if is_top_class.sum() == 1:
-            rank_ser.loc[is_top_class] = "primary"
-            return rank_ser
-
-        # If we get to here, we have more than one top feature hit
-        # Do we have top feature hits for several genes, e.g. are we in
-        # the promoter of two different genes (perhaps one on the plus
-        # and one on the minus strand)?
-        gene_anno = gene_names_ser.loc[feat_class_ser.index]
-        if gene_anno.nunique() == 1:
-            # We have only one gene
-            # The data are presorted by the distance, so we can just mark the top hit
-            # Note that this may e.g. be promoters from several
-            # transcripts for the same gene, and we don't prefer the
-            # primary transcript here... This could easily be
-            # implemented by sorting by the appris_principal score
-            rank_ser.iat[0] = "primary"
-            return rank_ser
-
-        # If we get to here, we have multiple genes for the top feature
-        # For each gene, take the best top feature hit - currently the
-        # one with the smallest distance. So currently no preference for
-        # the principal transcript.
-        def tag_first_element(ser):
-            ser = ser.copy()
-            ser.iat[0] = "primary"
-            return ser
-
-        rank_ser.loc[is_top_class] = (
-            rank_ser.loc[is_top_class].groupby(gene_anno).transform(tag_first_element)
-        )
-
-        return rank_ser
 
     print("Classify annotations")
-    full_annos_sorted["feature_rank"] = full_annos_sorted.groupby(["gtfanno_uid"])[
-        "feat_class"
-    ].transform(classify_annos, gene_names_ser=full_annos_sorted["gene_name"])
+    full_annos_sorted["feature_rank"] = compute_feature_rank_classification(
+        full_annos_sorted
+    )
+    assert full_annos_sorted['feature_rank'].isin(['primary', 'secondary']).all()
+    assert full_annos_sorted['feat_class'].notnull().all()
     # %%
 
     print("Add intergenic regions")
@@ -288,7 +239,12 @@ def annotate(
     intergenic_regions = (
         query_df.loc[~query_df["gtfanno_uid"].isin(uids_annotated_regions), :]
         .copy()
-        .assign(feat_class="intergenic", feature_rank="primary")
+        .assign(
+            feat_class=lambda df: pd.Series(
+                "intergenic", dtype=feat_class_cat_dtype, index=df.index
+            ),
+            feature_rank="primary",
+        )
     )
 
     # Merge intergenic regions and regions with annotations
@@ -296,11 +252,10 @@ def annotate(
     # sort of the columns. Disable with sort=False
     all_regions_annotated = pd.concat(
         [full_annos_sorted, intergenic_regions], sort=False, axis=0
-    )
-
+    ).sort_values(["Chromosome", "Start", "End"])
+    assert all_regions_annotated["feat_class"].dtype == feat_class_cat_dtype
     # Sanity check: when we sort by GRange columns, the gtfanno_uid should be
     # sorted too. All original UIDs should still be present.
-    all_regions_annotated.sort_values(["Chromosome", "Start", "End"], inplace=True)
     assert (
         all_regions_annotated["gtfanno_uid"].unique() == np.arange(query_df.shape[0])
     ).all()
@@ -796,3 +751,96 @@ def _assign_utr_location(utrs_exon_df: pd.DataFrame) -> pd.Series:
         #         raise ValueError()
 
     return features_with_utr_5_and_3_prime_distinction
+
+
+def _classify_annos(feat_class_ser, gene_names_ser):
+    """Called from groupby-transform: classify annotations into primary and secondary for one region
+
+    Algorithm:
+    - the sorting scheme is leveraged to find the highest priority candidate:
+      the highest priority feature will be at the beginning of the series,
+      and within the feature, the lowest distance will be at the beginning
+    """
+
+    # Only one annotation for the region -> must be primary
+    if feat_class_ser.shape[0] == 1:
+        rank_ser = pd.Series("primary", index=feat_class_ser.index)
+        return rank_ser
+
+    rank_ser = pd.Series("secondary", index=feat_class_ser.index)
+    top_class = feat_class_ser.iat[0]
+    is_top_class = feat_class_ser.eq(top_class)
+
+    # Only one annotation for the top class -> make the top annotation primary
+    if is_top_class.sum() == 1:
+        rank_ser.loc[is_top_class] = "primary"
+        return rank_ser
+
+    # If we get to here, we have more than one top feature hit
+    # Do we have top feature hits for several genes, e.g. are we in
+    # the promoter of two different genes (perhaps one on the plus
+    # and one on the minus strand)?
+    gene_anno = gene_names_ser.loc[feat_class_ser.index]
+    if gene_anno.nunique() == 1:
+        # We have only one gene
+        # The data are presorted by the distance, so we can just mark the top hit
+        # Note that this may e.g. be promoters from several
+        # transcripts for the same gene, and we don't prefer the
+        # primary transcript here... This could easily be
+        # implemented by sorting by the appris_principal score
+        rank_ser.iat[0] = "primary"
+        return rank_ser
+
+    # If we get to here, we have multiple genes for the top feature
+    # For each gene, take the best top feature hit - currently the
+    # one with the smallest distance. So currently no preference for
+    # the principal transcript.
+    def tag_first_element(ser):
+        ser = ser.copy()
+        ser.iat[0] = "primary"
+        return ser
+
+    rank_ser.loc[is_top_class] = (
+        rank_ser.loc[is_top_class].groupby(gene_anno).transform(tag_first_element)
+    )
+
+    return rank_ser
+
+
+def compute_feature_rank_classification(annos_sorted):
+    """Compute feature rank classification ('primary' vs 'secondary')
+
+    Args:
+        annos_sorted:
+            - The dataframe MUST BE SORTED on ["gtfanno_uid", "feat_class", "distance"]
+            - annotation dataframe following gtfanno conventions, used columns:
+                - gtfanno_uid
+                - feat_class
+                - distance
+                - gene_name
+            - feature class must be ordered categorical with most important feature as first element, *following the same precedence as used elsewhere in the annotation workflow*
+            - in the main workflow, this is called on the full annotation dataframe with all annotations (except for 'intergenic', which is an implementation detail). Note that this function also works with a subset of the full annotations!
+
+    Returns:
+        rank classification series with values 'primary' or 'secondary'
+        in the original dataframe order
+    """
+
+    assert annos_sorted['feat_class'].dtype.name == 'category'
+
+    # assert that input dataframe is appropriately sorted
+    pd.testing.assert_frame_equal(
+        annos_sorted,
+        annos_sorted.sort_values(["gtfanno_uid", "feat_class", "distance"]),
+    )
+    # and has a unique index (just a defensive measure to assert that we can check that the index order did not change in the result series)
+    assert not annos_sorted.index.has_duplicates
+
+    res = annos_sorted.groupby(["gtfanno_uid"], sort=True)["feat_class"].transform(
+        _classify_annos, gene_names_ser=annos_sorted["gene_name"]
+    )
+    # due to gtfanno_uid sorting in groupby + transform, the element order should remain unchanged compared to the original dataframe
+
+    pd.testing.assert_index_equal(res.index, annos_sorted.index)
+
+    return res

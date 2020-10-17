@@ -1,1 +1,1 @@
-from gtfanno.gtfanno import annotate
+from gtfanno.gtfanno import annotate, compute_feature_rank_classification
