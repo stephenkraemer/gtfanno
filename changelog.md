@@ -1,4 +1,11 @@
+2020-10-18
+
+- fix: output and intermediate dataframes produced by and in annotate do not have a unique, sorted, consecutive index
+  - this is an aesthetic fix which should not change the annotation result
+
 2020-10-17
+
+commit: 53d90a7
 
 - add 'intron' and 'intergenic' to the precedence table
 - fix: all_regions_annotated['feat_class'] is object dtype (and probably also primary_annos['feat_class']) instead of categorical

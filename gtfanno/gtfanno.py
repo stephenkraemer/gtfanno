@@ -204,7 +204,6 @@ def annotate(
             "intergenic",
         ]
     )
-
     feat_class_cat_dtype = CategoricalDtype(ordered=True, categories=precedence)
     full_annos["feat_class"] = full_annos["feat_class"].astype(feat_class_cat_dtype)
 
@@ -215,7 +214,7 @@ def annotate(
     # as a parameter
     full_annos_sorted = full_annos.sort_values(
         ["gtfanno_uid", "feat_class", "distance"]
-    )
+    ).reset_index(drop=True)
 
     # How many regions can we expect to have multiple annotations?
     # almost all regions have multiple annotations (tested with DMRs against gencode)
@@ -252,7 +251,7 @@ def annotate(
     # sort of the columns. Disable with sort=False
     all_regions_annotated = pd.concat(
         [full_annos_sorted, intergenic_regions], sort=False, axis=0
-    ).sort_values(["Chromosome", "Start", "End"])
+    ).sort_values(["Chromosome", "Start", "End"]).reset_index(drop=True)
     assert all_regions_annotated["feat_class"].dtype == feat_class_cat_dtype
     # Sanity check: when we sort by GRange columns, the gtfanno_uid should be
     # sorted too. All original UIDs should still be present.
