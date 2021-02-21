@@ -70,6 +70,6 @@ ga.annotate(
 )
 ```
 
-See the usage notebook (here)[./doc/usage.ipynb] for details.
+See the usage notebook [here](./doc/usage.ipynb) for details.
 
 
