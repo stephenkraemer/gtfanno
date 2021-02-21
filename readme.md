@@ -31,7 +31,8 @@ Optional selection of the top annotation for each gene can be performed with sim
 
 # Package maturity
 
-This package is unreleased, unpublished pre-alpha software, but it is relatively mature and stable. We use it often in in-house projects, but cannot yet provide support for external users. Also, given the pre-alpha status, we do change the API from time to time, without regard for health and safety of external users.
+This package is unreleased and unpublished software, but we use it often in in-house projects. We can not yet provide support for external users. Also, given the development status, we do change the API from time to time, without regard for health and safety of external users.
+
 
 # Installation
 
@@ -41,12 +42,12 @@ There are no pypi or conda packages yet. The package can be installed directly f
 pip install git+https://github.com/stephenkraemer/gtfanno.git
 ```
 
-The package requires python >= 3.8 (see setup.py for all requirements). We recommend installing the package into a conda environment. Consider installing a tagged version for reproducibility. 
+The package requires python >= 3.8 and pybedtools (and thus also: *bedtools*), see setup.py for all requirements. We recommend installing the package into a conda environment. Consider installing a tagged version for reproducibility. 
 
 ```
-conda create -n gtfanno_env python=3.8
+conda create -n gtfanno_env python=3.8 pybedtools
 conda activate gtfanno_env
-pip install git+https://github.com/stephenkraemer/gtfanno.git@v0.2
+pip install git+https://github.com/stephenkraemer/gtfanno.git@0.2.0
 
 ```
 
