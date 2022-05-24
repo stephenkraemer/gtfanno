@@ -404,7 +404,7 @@ def annotate_transcript_parts(
         sep="\t",
         header=None,
         names=col_names,
-        dtype={"Chromosome": chromosome_dtype},
+        dtype={"Chromosome": chromosome_dtype, 'feat_chrom': str},
     )
 
     # Add additional stats
@@ -607,7 +607,7 @@ def annotate_with_tss(
         tss_intersect_bt.fn,
         sep="\t",
         names=["Chromosome", "Start", "End", "gtfanno_uid"] + transcripts_cols,
-        dtype={"Chromosome": chromosome_dtype},
+        dtype={"Chromosome": chromosome_dtype, 'feat_chrom': str},
     )
 
     # Add the remaining required output columns and bring in correct order
@@ -639,10 +639,13 @@ def annotate_with_tss(
         f" <= {distant_cis_regulatory_domain[1]}"
     )
     tss_anno["feat_class"] = np.nan
-    tss_anno.loc[is_proximal_promoter, "feat_class"] = "Promoter"
-    tss_anno.loc[is_proximal_promoter, "has_center"] = True
+    # The order is important, we overwrite DCRD annos with Promoter annos
+    # double annos can happen if the DCRD interval contains the Promoter interval
+    print('FIXED DCRD ANNO')
     tss_anno.loc[is_distant_cis_regulatory_domain, "feat_class"] = "DCRD"
     tss_anno.loc[is_distant_cis_regulatory_domain, "has_center"] = True
+    tss_anno.loc[is_proximal_promoter, "feat_class"] = "Promoter"
+    tss_anno.loc[is_proximal_promoter, "has_center"] = True
     # Discard regions without annotation
     # These are regions which overlap with TSS area, but not with their center
     tss_anno = tss_anno.loc[~tss_anno["feat_class"].isna(), :]
